@@ -1,0 +1,9 @@
+lot_id,territorial_archetype,service,capability_groups,c0_mrub,opex_mrub_per_year,anchor_cash_mrub_per_year,commercial_cash_mrub_per_year,vpub_mrub_per_year,t_rep,readiness_1_5,resilience_1_5,scale_1_5,federal
+FIRE,Siberian,Siberian forest fire monitoring,EO,320,85,75,35,560,0.68,4.3,3.5,4.5,false
+FLOOD,FarEast,Flood and landslide monitoring,EO,340,90,85,45,600,0.62,4.0,4.2,4.2,false
+AGRI,South,Agricultural analytics,EO;PNT/InSAR,260,75,30,120,230,0.74,4.6,4.1,4.8,false
+INFRA,UralVolga,Infrastructure deformation monitoring,PNT/InSAR,310,80,55,105,300,0.71,4.1,4.0,4.6,false
+ARCTIC,Arctic,Remote logistics support,SATCOM;PNT/InSAR,460,140,85,135,470,0.55,3.2,2.8,3.6,false
+TRANS,Central,Transport monitoring,PNT/InSAR;EO,250,70,45,95,220,0.77,4.8,4.4,4.7,false
+ENV,VolgaCaspian,Environmental monitoring,EO,280,75,55,85,360,0.73,4.4,4.2,4.7,false
+SSA,Federal,Space situational awareness,SSA,330,95,65,100,340,0.64,3.6,3.1,4.9,true

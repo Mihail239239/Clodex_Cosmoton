@@ -1,0 +1,4 @@
+mode_id,k_c0,k_opex,k_vpub,k_anchor,k_commercial,public_core
+A,1.05,1.05,1.0,1.0,0.25,true
+B,1.0,1.0,0.82,0.8,0.7,false
+C,0.98,0.95,0.62,0.45,0.95,false

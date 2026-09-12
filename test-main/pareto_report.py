@@ -218,7 +218,108 @@ def _md_table(df, cols, headers, fmt=None):
     return '\n'.join(lines)
 
 
-def build_markdown(f, stats, reference, config, norm):
+# ---------------------------------------------------------------------------
+# Обозначения и формулы (для расшифровки расчёта в отчёте)
+# ---------------------------------------------------------------------------
+# Каждый пункт: (обозначение, формула / источник, смысл). Секции выводятся в
+# markdown и HTML одинаково; менять здесь, а не в рендерах.
+
+GLOSSARY = [
+    ('Входные данные лота (`data/lots.csv`, канон, не меняются)', [
+        ('C', '`c0_mrub`', 'разовые затраты на запуск сервиса, млн руб.'),
+        ('O', '`opex_mrub_per_year`', 'годовые эксплуатационные затраты, млн руб./год'),
+        ('V', '`vpub_mrub_per_year`', 'общественная ценность, млн руб./год — оценка эффекта, не денежный поток'),
+        ('P', '`anchor_cash_mrub_per_year`', 'якорные поступления от публичного заказчика, млн руб./год'),
+        ('Q', '`commercial_cash_mrub_per_year`', 'коммерческие поступления от бизнеса, млн руб./год'),
+        ('t_rep', '`t_rep`', 'канонический безразмерный показатель, 0…1; порог 0.63 по среднему портфеля; содержательная расшифровка в материалах кейса не дана (README организаторов просит не подменять её догадкой)'),
+        ('readiness, resilience, scale', '`*_1_5`', 'готовность, устойчивость, масштабируемость лота, 1…5'),
+        ('архетип, группы', '`territorial_archetype`, `capability_groups`', 'территория лота; группы возможностей EO, PNT/InSAR, SATCOM, SSA'),
+    ]),
+    ('Режим доступа и пересчёт лота (`case_core.apply_mode`)', [
+        ('k_c0, k_opex, k_vpub, k_anchor, k_commercial', '`data/access_modes.csv` (A/B/C), `user_modes.py` (D1, D3)', 'множители режима; `public_core` — флаг бесплатного общественного слоя'),
+        ('c0', 'C · k_c0', 'затраты лота в выбранном режиме'),
+        ('opex', 'O · k_opex', 'эксплуатация лота в режиме'),
+        ('vpub', 'V · k_vpub', 'общественная ценность лота в режиме'),
+        ('cash', 'P · k_anchor + Q · k_commercial', 'денежные поступления лота; vpub сюда не входит'),
+    ]),
+    ('Метрики портфеля (`case_core.evaluate_portfolio`, быстрый путь `team_model._fast_metrics`)', [
+        ('c0, opex, vpub, cash', 'Σ по четырём лотам', 'суммарные показатели портфеля'),
+        ('kcash', 'cash / opex', 'покрытие эксплуатации поступлениями; ≥ 1 — субсидия не нужна'),
+        ('t_rep, readiness, resilience, scale', 'среднее по четырём лотам', 'качественные индексы портфеля'),
+        ('архетипы', 'число различных `territorial_archetype` среди нефедеральных лотов', 'территориальное покрытие'),
+        ('группы', 'число различных групп возможностей', 'технологическое разнообразие'),
+        ('ядро', 'число лотов с `public_core = true`', 'лоты с гарантированным бесплатным слоем'),
+    ]),
+    ('Ограничения (`case_core.check_constraints`, все девять в BASE и STRESS)', [
+        ('лоты', '= 4', 'ровно четыре уникальных лота'),
+        ('архетипы ≥ 3, группы ≥ 2, ядро ≥ 2', '`constraints_common`', 'структурные требования'),
+        ('c0 ≤ 1300 (BASE) / 1180 (STRESS)', '`scenarios`', 'единственное различие сценариев'),
+        ('opex ≤ 360, vpub ≥ 1000, kcash ≥ 0.6, t_rep ≥ 0.63', '`constraints_common`', 'пороги на год'),
+    ]),
+    ('Финансовые метрики (`team_model.financial_metrics`; допущения r = 0.10, T = 10 лет)', [
+        ('af', '(1 − (1 + r)^−T) / r = 6.1446', 'аннуитетный множитель: сумма дисконтов за T лет'),
+        ('net', 'cash − opex', 'годовой операционный поток; субсидия = −net при net < 0'),
+        ('NPV', '−c0 + net · af', 'чистая приведённая стоимость денежного потока, млн руб.'),
+        ('PI', 'net · af / c0', 'индекс доходности: приведённый поток на рубль запуска'),
+        ('IRR', 'решение −c0 + net · af(IRR, T) = 0', 'ставка, при которой NPV = 0; не существует при net ≤ 0'),
+        ('payback', '−ln(1 − c0 · r / net) / ln(1 + r)', 'дисконтированный срок окупаемости; ∞ при c0 · r ≥ net'),
+        ('total_cost_pv', 'c0 + opex · af', 'полная приведённая стоимость владения'),
+        ('SROI', 'vpub · af / total_cost_pv', 'рублей общественной ценности на рубль полной стоимости'),
+    ]),
+    ('Нормировка (`team_model.normalize_criteria`)', [
+        ('minmax (принята)', 'z = (x − min) / (max − min)', 'по 1 056 допустимым кандидатам; каждый критерий заранее ориентирован «больше = лучше»; константа → 0'),
+        ('threshold (проверка)', 'z = 1 − порог/x; z = 1 − x/лимит; z = (индекс − 1)/4', 'привязка к порогам ограничений и точке безубыточности, отсечка снизу −1'),
+    ]),
+    ('Блоки и итоговый вектор (`team_model.fitness_function`, `criteria_vector`)', [
+        ('F_fin', 'z_NPV + z_PI + z_kcash', 'деньги, 0…3'),
+        ('F_public', 'z_vpub + z_SROI + z_ядро', 'общественная польза, 0…3; доля ядра = ядро / 4'),
+        ('F_quality', 'z_t_rep + z_readiness + z_resilience + z_scale', 'нефинансовое качество, 0…4; зависит только от набора лотов'),
+        ('S', 'F_fin + F_public + F_quality = Σ всех десяти z', 'сумма нормированных, 0…10 — скалярный рейтинг (раздел «Выбор по сумме»)'),
+        ('S_eq', 'F_fin/3 + F_public/3 + F_quality/4', 'та же сумма с равными весами блоков, 0…3'),
+    ]),
+    ('Порядок, фронт и проверки (`team_model.pareto_mask`, `pareto_report`)', [
+        ('X ≽ Y', 'F_k(X) ≥ F_k(Y) для всех k и > хотя бы для одного', 'X доминирует Y; максимальный элемент — тот, кого никто не доминирует'),
+        ('ранг', 'место элемента по блоку среди элементов фронта', 'в разделе преимуществ/недостатков'),
+        ('запас c0', '1180 − c0', 'до лимита STRESS, млн руб.'),
+        ('откат D → A', 'те же лоты, D заменён на A; проверка девяти ограничений', 'допустим ли портфель, если гипотеза D не подтвердится'),
+        ('θ* (D1)', '(δ_c0 · C / af + δ_opex · O) / (0.45 · Q)', 'доля разрыва B−A, при которой надстройка окупается; принято θ = 0.20'),
+        ('экономия D3', 'C · (1.05 · σ_c0 · ρ_c0 − γ_c0) + af · O · (1.05 · σ_opex · ρ_opex − γ_opex)', 'выигрыш NPV лота против A; допустимо при ≥ 2 лотах с общей группой'),
+    ]),
+]
+
+FUNCTION_MAP = [
+    ('`case_core.py`', '`load_case`, `apply_mode`, `evaluate_portfolio`, `check_constraints`', 'канонический слой организаторов; не изменён'),
+    ('`team_model.py` §2–3', '`normalize_metrics`, `constraint_report`', 'z относительно порогов, таблица порог/факт/запас'),
+    ('`team_model.py` §6', '`annuity_factor`, `financial_metrics`, `_irr`, `_discounted_payback`', 'NPV, PI, IRR, окупаемость, SROI'),
+    ('`team_model.py` §8', '`_precompute`, `_fast_metrics`, `_feasible_fast`', 'быстрый перебор, сверенный с каноном'),
+    ('`team_model.py` §9', '`CRITERIA_REGISTRY`, `BLOCKS`, `normalize_criteria`, `fitness_function`, `criteria_vector`, `pareto_mask`', 'нормировка, блоки, частичный порядок'),
+    ('`user_modes.py`', '`d1_coefficients`, `d3_coefficients`, `ADMISSIBILITY`, `d1_breakeven_table`, `d3_breakeven_table`', 'вывод D из A/B, допустимость, безубыточность'),
+    ('`pareto_search.py`', '`build_worlds`, `enumerate_world`, `run_search`, `verify_against_canon`', 'миры перебора, отсечение, фронт, сверка'),
+    ('`pareto_report.py`', '`enrich_front`, `pros_cons`, `sum_ranking`, `conclusions`', 'ранги, откат, тексты, рейтинг по сумме'),
+]
+
+
+def sum_ranking(cand, f, top=15):
+    """Скалярный рейтинг по сумме нормированных среди всех допустимых кандидатов.
+
+    S = Σ z по всем компонентам блоков (= F_fin + F_public + F_quality);
+    S_eq — с равными весами блоков. Флаг pareto показывает, максимален ли элемент.
+    """
+    weights = {name: 1.0 / len(keys) for name, keys in tm.BLOCKS.items()}
+    d = cand.copy()
+    d['S'] = sum(d[b] for b in tm.BLOCKS)
+    d['S_eq'] = sum(d[b] * w for b, w in weights.items())
+    d['rank_S'] = d['S'].rank(ascending=False, method='min').astype(int)
+    d['rank_S_eq'] = d['S_eq'].rank(ascending=False, method='min').astype(int)
+    no_map = dict(zip(zip(f['lots'], f['modes']), f['no']))
+    d['no'] = [no_map.get(k, 0) for k in zip(d['lots'], d['modes'])]
+    top_s = d.sort_values('S', ascending=False).head(top)
+    top_eq = d.sort_values('S_eq', ascending=False).head(top)
+    keep = pd.concat([top_s, top_eq]).drop_duplicates(subset=['lots', 'modes']).sort_values('S', ascending=False)
+    return keep.reset_index(drop=True)
+
+
+def build_markdown(f, stats, reference, config, norm, cand=None):
     n = len(f)
     c = config['constraints_common']
     um_df = um.build_user_modes(load_case('.')[1])
@@ -276,7 +377,23 @@ def build_markdown(f, stats, reference, config, norm):
                          {'min': lambda v: f'{v:.4g}', 'max': lambda v: f'{v:.4g}'}))
     out.append('')
 
-    out.append('## 2. Пользовательские режимы в прогоне\n')
+    out.append('## 2. Обозначения, формулы и функции\n')
+    out.append('Расшифровка всех величин, которые встречаются в таблицах ниже, и карта функций по файлам.\n')
+    for title, items in GLOSSARY:
+        out.append(f'**{title}**\n')
+        out.append('| обозначение | формула / источник | смысл |')
+        out.append('|---|---|---|')
+        for sym, formula, meaning in items:
+            out.append(f'| {sym} | {formula} | {meaning} |')
+        out.append('')
+    out.append('**Карта функций**\n')
+    out.append('| файл | функции | назначение |')
+    out.append('|---|---|---|')
+    for file, funcs, purpose in FUNCTION_MAP:
+        out.append(f'| {file} | {funcs} | {purpose} |')
+    out.append('')
+
+    out.append('## 3. Пользовательские режимы в прогоне\n')
     out.append(_md_table(um_df, ['mode_id', 'k_c0', 'k_opex', 'k_vpub', 'k_anchor', 'k_commercial', 'public_core', 'label'],
                          ['режим', 'k_c0', 'k_opex', 'k_vpub', 'k_anchor', 'k_commercial', 'ядро', 'механизм'],
                          {k: (lambda v: f'{v:.4g}') for k in ('k_c0', 'k_opex', 'k_vpub', 'k_anchor', 'k_commercial')}))
@@ -298,16 +415,16 @@ def build_markdown(f, stats, reference, config, norm):
                          {k: (lambda v: f'{v:.2f}') for k in ('dC0_saved_mrub', 'dOPEX_saved_mrub_per_year', 'dNPV_vs_A_mrub')}))
     out.append('')
 
-    out.append('## 3. Максимальные элементы: сводная таблица\n')
+    out.append('## 4. Максимальные элементы: сводная таблица\n')
     out.append('Сгруппировано по набору лотов (кластеры упорядочены по лучшему F_fin), внутри кластера — по F_fin. '
-               'Ранги в разделе 4 считаются среди элементов фронта. «Запас c0» — до лимита STRESS 1180.\n')
+               'Ранги в разделе 5 считаются среди элементов фронта. «Запас c0» — до лимита STRESS 1180.\n')
     out.append(_md_table(f, ['no', 'lots', 'modes', 'F_fin', 'F_public', 'F_quality', 'npv_mrub', 'profitability_index',
                              'kcash', 'vpub_mrub_per_year', 'sroi', 'public_core_lots', 't_rep', 'c0_mrub', 'headroom_c0_stress'],
                          ['№', 'лоты', 'режимы', 'F_fin', 'F_public', 'F_quality', 'NPV', 'PI', 'kcash', 'vpub', 'SROI',
                           'ядро', 't_rep', 'c0', 'запас c0'], num))
     out.append('')
 
-    out.append('## 4. Преимущества и недостатки каждого элемента\n')
+    out.append('## 5. Преимущества и недостатки каждого элемента\n')
     out.append('Правила формирования текста фиксированы в `pareto_report.pros_cons` — одинаковые для всех элементов. '
                '«Откат D → A» — проверка: если гипотеза D не подтвердится сметой/спросом и лоты вернутся в A, '
                'остаётся ли портфель допустимым.\n')
@@ -323,7 +440,7 @@ def build_markdown(f, stats, reference, config, norm):
             out.append(f'- {q}')
         out.append('')
 
-    out.append('## 5. Структура фронта по наборам лотов\n')
+    out.append('## 6. Структура фронта по наборам лотов\n')
     g = cluster_table(f)
     out.append(_md_table(g, ['lots', 'n', 'F_fin_max', 'F_public_max', 'F_quality', 'npv_max', 'vpub_min', 'vpub_max', 'archetypes'],
                          ['лоты', 'элементов', 'F_fin max', 'F_public max', 'F_quality', 'NPV max', 'vpub min', 'vpub max', 'архетипы'],
@@ -332,7 +449,7 @@ def build_markdown(f, stats, reference, config, norm):
                           'vpub_min': lambda v: f'{v:.0f}', 'vpub_max': lambda v: f'{v:.0f}'}))
     out.append('')
 
-    out.append('## 6. Представители фронта\n')
+    out.append('## 7. Представители фронта\n')
     out.append('| роль | № | лоты | режимы | F_fin | F_public | F_quality | NPV | kcash | vpub | ядро | откат D → A |')
     out.append('|---|---|---|---|---|---|---|---|---|---|---|---|')
     for role, r in representatives(f):
@@ -341,7 +458,30 @@ def build_markdown(f, stats, reference, config, norm):
                    f'{fallback_label(r)} |')
     out.append('')
 
-    out.append('## 7. Выводы по структуре фронта\n')
+    if cand is not None:
+        out.append('## 8. Выбор по сумме нормированных\n')
+        out.append('Скалярный рейтинг по всем допустимым кандидатам: S = F_fin + F_public + F_quality — сумма всех '
+                   'десяти нормированных компонент (0…10), неявные веса блоков 3 : 3 : 4 по числу компонент; '
+                   'S_eq = F_fin/3 + F_public/3 + F_quality/4 — равные веса блоков (0…3). Максимум положительно '
+                   'взвешенной суммы всегда лежит на фронте, следующие места — не обязательно: столбец «фронт» '
+                   'показывает, максимален ли элемент (№ — его номер в разделах 4–5).\n')
+        sr = sum_ranking(cand, f)
+        out.append(_md_table(sr, ['rank_S', 'S', 'rank_S_eq', 'S_eq', 'no', 'lots', 'modes', 'F_fin', 'F_public', 'F_quality',
+                                  'pareto', 'npv_mrub', 'kcash', 'vpub_mrub_per_year', 'public_core_lots'],
+                             ['место S', 'S', 'место S_eq', 'S_eq', '№', 'лоты', 'режимы', 'F_fin', 'F_public', 'F_quality',
+                              'фронт', 'NPV', 'kcash', 'vpub', 'ядро'],
+                             {'S': lambda v: f'{v:.3f}', 'S_eq': lambda v: f'{v:.3f}', 'F_fin': lambda v: f'{v:.3f}',
+                              'F_public': lambda v: f'{v:.3f}', 'F_quality': lambda v: f'{v:.3f}',
+                              'no': lambda v: str(int(v)) if v else '—', 'pareto': lambda v: 'да' if v else 'нет',
+                              'npv_mrub': lambda v: f'{v:.0f}', 'kcash': lambda v: f'{v:.2f}',
+                              'vpub_mrub_per_year': lambda v: f'{v:.0f}', 'public_core_lots': lambda v: str(int(v))}))
+        best = sr.iloc[0]
+        best_eq = sr.sort_values('S_eq', ascending=False).iloc[0]
+        out.append(f'\nЛучший по S: **{best.lots} — {best.modes}** (S = {best.S:.3f}); лучший по S_eq: '
+                   f'**{best_eq.lots} — {best_eq.modes}** (S_eq = {best_eq.S_eq:.3f}). '
+                   'Сумма — это уже выбор весов; фронт показывает, что теряется при любом другом их наборе.\n')
+
+    out.append('## 9. Выводы по структуре фронта\n')
     out.append(f'Выводы проверены для прогона от {date.today().isoformat()}; при смене параметров D или блоков '
                'перегенерировать отчёт и перечитать этот раздел.\n')
     for i, para in enumerate(conclusions(f), 1):
@@ -453,7 +593,7 @@ def main(argv=None):
     worlds = build_worlds(modes)
     cand, front, stats, reference = run_search(lots, modes, config, worlds, norm=args.norm)
     f = enrich_front(front, lots, modes, config, worlds)
-    text, f, pc = build_markdown(f, stats, reference, config, args.norm)
+    text, f, pc = build_markdown(f, stats, reference, config, args.norm, cand)
 
     md_path = Path(args.root) / args.md
     md_path.write_text(text, encoding='utf-8')
@@ -463,7 +603,8 @@ def main(argv=None):
     f[export].to_csv(out / 'pareto_front_report.csv', index=False)
     from pareto_html import build_html
     html_text = build_html(f, pc, cand, stats, reference, config, args.norm, family_of, FAMILIES,
-                           cluster_table(f), representatives(f), conclusions(f), lots, modes)
+                           cluster_table(f), representatives(f), conclusions(f), lots, modes,
+                           glossary=GLOSSARY, function_map=FUNCTION_MAP, sum_df=sum_ranking(cand, f))
     html_path = Path(args.root) / args.html
     html_path.write_text(html_text, encoding='utf-8')
     print(f'Фронт: {len(f)} элементов. Записано {md_path}, {html_path} и {out / "pareto_front_report.csv"}')

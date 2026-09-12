@@ -189,6 +189,11 @@ dl.spec dd{margin:0}
 .tbl td.num{text-align:right;font-variant-numeric:tabular-nums}
 .tbl td.wrap{white-space:normal;min-width:260px}
 .tbl.compact{min-width:0}
+.tbl.gloss{min-width:0}
+.tbl.gloss td{white-space:normal;vertical-align:top}
+.tbl.gloss td.sym{font-weight:500;min-width:120px}
+.tbl.gloss td.formula{font-family:"IBM Plex Mono",ui-monospace,Consolas,monospace;font-size:12.5px;min-width:180px}
+.tbl.gloss td.wrap{min-width:220px}
 .fam{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:8px;vertical-align:-1px;background:var(--fam-other)}
 .fam-money{background:var(--fam-money)} .fam-public{background:var(--fam-public)} .fam-quality{background:var(--fam-quality)} .fam-other{background:var(--fam-other)}
 .legend{display:flex;flex-wrap:wrap;gap:8px 22px;font-size:13.5px;margin:14px 0 6px;align-items:center}
@@ -263,7 +268,8 @@ JS = """
 """
 
 
-def build_html(f, pc, cand, stats, reference, config, norm, family_of, families, cluster_df, reps, theses, lots_df, modes_df):
+def build_html(f, pc, cand, stats, reference, config, norm, family_of, families, cluster_df, reps, theses, lots_df, modes_df,
+               glossary=(), function_map=(), sum_df=None):
     n = len(f)
     c = config['constraints_common']
     um_df = um.build_user_modes(modes_df)
@@ -348,6 +354,21 @@ def build_html(f, pc, cand, stats, reference, config, norm, family_of, families,
                        {'min': lambda v: num(v, 3), 'max': lambda v: num(v, 3)}, classes='compact'))
 
     # --- user modes
+    parts.append('<h2>Обозначения, формулы и функции</h2>')
+    parts.append('<p class="prose">Расшифровка всех величин, которые встречаются в таблицах ниже, и карта функций по файлам.</p>')
+    for title, items in glossary:
+        parts.append(f'<h3>{inline(title)}</h3>')
+        rows = ''.join(f'<tr><td class="sym">{inline(sym)}</td><td class="formula">{inline(formula)}</td>'
+                       f'<td class="wrap">{inline(meaning)}</td></tr>' for sym, formula, meaning in items)
+        parts.append(f'<div class="tbl-wrap"><table class="tbl gloss"><thead><tr><th>обозначение</th>'
+                     f'<th>формула / источник</th><th>смысл</th></tr></thead><tbody>{rows}</tbody></table></div>')
+    if function_map:
+        parts.append('<h3>Карта функций</h3>')
+        rows = ''.join(f'<tr><td class="formula">{inline(file)}</td><td class="formula wrap">{inline(funcs)}</td>'
+                       f'<td class="wrap">{inline(purpose)}</td></tr>' for file, funcs, purpose in function_map)
+        parts.append(f'<div class="tbl-wrap"><table class="tbl gloss"><thead><tr><th>файл</th><th>функции</th>'
+                     f'<th>назначение</th></tr></thead><tbody>{rows}</tbody></table></div>')
+
     parts.append('<h2>Пользовательские режимы в прогоне</h2>')
     parts.append('<p class="prose">Коэффициенты выводятся формулами из канонических A/B, а не задаются числами; параметры '
                  'механизмов, формулы, условия допустимости и точки безубыточности — в docstring <code>user_modes.py</code>. '
@@ -424,6 +445,28 @@ def build_html(f, pc, cand, stats, reference, config, norm, family_of, families,
                         'vpub': fmt0, 'core': fmt_int}, family_col='lots', family_of=family_of))
 
     # --- theses
+    if sum_df is not None:
+        parts.append('<h2>Выбор по сумме нормированных</h2>')
+        parts.append('<p class="prose">Скалярный рейтинг по всем допустимым кандидатам. <b>S</b> = F_fin + F_public + F_quality — '
+                     'сумма всех десяти нормированных компонент (0…10), неявные веса блоков 3 : 3 : 4 по числу компонент; '
+                     '<b>S_eq</b> = F_fin/3 + F_public/3 + F_quality/4 — равные веса блоков (0…3). Максимум положительно '
+                     'взвешенной суммы всегда лежит на фронте, следующие места — не обязательно: столбец «фронт» показывает, '
+                     'максимален ли элемент (№ — его номер в разделах выше).</p>')
+        parts.append(table(sum_df, ['rank_S', 'S', 'rank_S_eq', 'S_eq', 'no', 'lots', 'modes', 'F_fin', 'F_public', 'F_quality',
+                                    'pareto', 'npv_mrub', 'kcash', 'vpub_mrub_per_year', 'public_core_lots'],
+                           ['место S', 'S', 'место S_eq', 'S_eq', '№', 'лоты', 'режимы', 'F_fin', 'F_public', 'F_quality',
+                            'фронт', 'NPV', 'kcash', 'vpub', 'ядро'],
+                           {'rank_S': fmt_int, 'S': fmt3, 'rank_S_eq': fmt_int, 'S_eq': fmt3, 'F_fin': fmt3, 'F_public': fmt3,
+                            'F_quality': fmt3, 'no': lambda v: str(int(v)) if v else '—',
+                            'pareto': lambda v: 'да' if v else 'нет', 'npv_mrub': fmt0, 'kcash': fmt2,
+                            'vpub_mrub_per_year': fmt0, 'public_core_lots': fmt_int},
+                           family_col='lots', family_of=family_of))
+        best = sum_df.iloc[0]
+        best_eq = sum_df.sort_values('S_eq', ascending=False).iloc[0]
+        parts.append(f'<p class="prose">Лучший по S: <b class="mono">{esc(best.lots)} — {esc(best.modes)}</b> (S = {num(best.S, 3)}); '
+                     f'лучший по S_eq: <b class="mono">{esc(best_eq.lots)} — {esc(best_eq.modes)}</b> (S_eq = {num(best_eq.S_eq, 3)}). '
+                     'Сумма — это уже выбор весов; фронт показывает, что теряется при любом другом их наборе.</p>')
+
     parts.append('<h2>Выводы по структуре фронта</h2>')
     parts.append(f'<p class="prose note">Проверены для прогона от {date.today().isoformat()}; при смене параметров D или '
                  'блоков перегенерировать отчёт и перечитать этот раздел.</p>')

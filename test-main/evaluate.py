@@ -42,6 +42,100 @@ import user_modes as um
 
 pd.set_option('display.width', 200)
 
+# ---------------------------------------------------------------------------
+# Форматирование вывода. Не влияет на расчёт — только на представление.
+# ---------------------------------------------------------------------------
+
+LABELS = {
+    'selected_lots': 'Лотов в портфеле', 'c0_mrub': 'Стартовые затраты C0',
+    'opex_mrub_per_year': 'Эксплуатация OPEX', 'vpub_mrub_per_year': 'Общественная ценность VPUB',
+    'cash_mrub_per_year': 'Денежные поступления CASH', 'kcash': 'Покрытие OPEX (kcash)',
+    't_rep': 'Показатель t_rep', 'readiness_1_5': 'Готовность (1–5)',
+    'resilience_1_5': 'Устойчивость (1–5)', 'scale_1_5': 'Масштабируемость (1–5)',
+    'territorial_archetypes': 'Территориальных архетипов', 'capability_groups': 'Групп возможностей',
+    'capability_set': 'Состав групп', 'public_core_lots': 'Лотов с общественным ядром',
+    'discount_rate': 'Ставка дисконтирования', 'horizon_years': 'Горизонт расчёта',
+    'net_cash_flow_mrub_per_year': 'Операционный профицит', 'pv_cash_mrub': 'PV поступлений',
+    'pv_opex_mrub': 'PV эксплуатации', 'pv_vpub_mrub': 'PV общественной ценности',
+    'total_cost_pv_mrub': 'Полная приведённая стоимость', 'npv_mrub': 'NPV',
+    'npv_per_c0': 'NPV на рубль C0', 'irr': 'IRR', 'profitability_index': 'Индекс доходности PI',
+    'payback_simple_years': 'Простая окупаемость', 'payback_discounted_years': 'Дисконт. окупаемость',
+    'payback_within_horizon': 'Окупается в горизонте', 'roi_horizon': 'ROI за горизонт',
+    'sroi': 'SROI', 'lcos_per_unit': 'Удельная стоимость услуги',
+    'vpub_per_c0': 'VPUB на рубль C0', 'vpub_per_opex': 'VPUB на рубль OPEX',
+    'cash_per_c0': 'CASH на рубль C0', 'subsidy_need_mrub_per_year': 'Потребность в субсидии',
+    'subsidy_share_of_opex': 'Доля субсидии в OPEX',
+    'anchor_cash_mrub_per_year': 'Якорные поступления',
+    'commercial_cash_mrub_per_year': 'Коммерческие поступления',
+    'anchor_share_of_cash': 'Доля якорных в CASH', 'commercial_share_of_cash': 'Доля коммерческих в CASH',
+    'public_core_share': 'Доля лотов с ядром', 'c0_per_lot_mrub': 'C0 на лот',
+    'opex_per_lot_mrub': 'OPEX на лот', 'hhi_capability': 'Концентрация групп (HHI)',
+    'cv_c0': 'Разброс C0 по лотам', 'cv_opex': 'Разброс OPEX', 'cv_vpub': 'Разброс VPUB',
+    'score_base': 'score BASE', 'score_stress': 'score STRESS',
+    'score_drop': 'Просадка score', 'score_drop_pct': 'Просадка score, %',
+    'score_robust': 'score робастный (min)',
+}
+_COUNTS = {'selected_lots', 'territorial_archetypes', 'capability_groups',
+           'public_core_lots', 'horizon_years'}
+_MONEY = {'c0_mrub', 'opex_mrub_per_year', 'vpub_mrub_per_year', 'cash_mrub_per_year',
+          'net_cash_flow_mrub_per_year', 'pv_cash_mrub', 'pv_opex_mrub', 'pv_vpub_mrub',
+          'total_cost_pv_mrub', 'npv_mrub', 'subsidy_need_mrub_per_year',
+          'anchor_cash_mrub_per_year', 'commercial_cash_mrub_per_year',
+          'c0_per_lot_mrub', 'opex_per_lot_mrub'}
+_SHARES = {'irr', 'discount_rate', 'subsidy_share_of_opex', 'anchor_share_of_cash',
+           'commercial_share_of_cash', 'public_core_share', 'roi_horizon'}
+_YEARS = {'payback_simple_years', 'payback_discounted_years'}
+
+
+def fmt_value(key, v):
+    """Человекочитаемое значение показателя."""
+    import math
+    if isinstance(v, bool):
+        return f'{"да" if v else "нет":>12s}'
+    if isinstance(v, (list, tuple, set)):
+        return f'{", ".join(map(str, v)):>12s}'
+    if not isinstance(v, (int, float)):
+        return f'{str(v):>12s}'
+    if isinstance(v, float) and math.isnan(v):
+        return f'{"—":>12s}'
+    if key in _YEARS and (isinstance(v, float) and math.isinf(v)):
+        return f'{"не окупается":>12s}'
+    if isinstance(v, float) and math.isinf(v):
+        return f'{"∞":>12s}'
+    if key in _COUNTS:
+        return f'{int(round(v)):>12d}'
+    if key in _MONEY:
+        return f'{v:>12,.2f} млн руб.'.replace(',', ' ')
+    if key in _SHARES:
+        return f'{100 * v:>11.1f} %'
+    if key in _YEARS:
+        return f'{v:>12.1f} лет'
+    if key == 'lcos_per_unit':
+        return f'{"—":>12s} (объём услуги не задан)'
+    return f'{v:>12.3f}'
+
+
+def print_block(title, data):
+    print(f'\n--- {title} ---')
+    for k, v in data.items():
+        print(f'  {LABELS.get(k, k):32s} {fmt_value(k, v)}')
+
+
+def fmt_constraints(df):
+    """Таблица ограничений без хвостов из нулей."""
+    out = df.copy()
+    for col in ('threshold', 'actual', 'margin'):
+        out[col] = [('—' if pd.isna(x) else
+                     (f'{x:g}' if abs(x - round(x)) < 1e-9 and abs(x) < 1e6
+                      else f'{x:.3f}'.rstrip('0').rstrip('.')))
+                    for x in df[col]]
+    out['ok'] = ['PASS' if x else 'FAIL' for x in df['ok']]
+    return out.rename(columns={'constraint': 'ограничение', 'op': 'условие',
+                               'threshold': 'порог', 'actual': 'факт',
+                               'margin': 'запас', 'ok': 'итог'})
+
+
+
 
 def build_mode_table(modes, enable_d=('D1', 'D3')):
     """Канонические A/B/C + запрошенные пользовательские режимы."""
@@ -122,26 +216,19 @@ def main(argv=None):
                 'cash_mrub_per_year', 'public_core', 'territorial_archetype']
         print(result['detail'][cols].round(2).to_string(index=False))
 
-        print('\n--- Метрики портфеля ---')
-        for k, v in result['metrics'].items():
-            print(f'  {k:26s} {v}')
-
-        print('\n--- Финансовые метрики (r=%.3f, T=%d лет) ---' % (
-            result['assumptions']['discount_rate'], result['assumptions']['horizon_years']))
-        for k, v in result['financial'].items():
-            print(f'  {k:26s} {v}')
-
-        print('\n--- Производные показатели ---')
-        for k, v in result['extras'].items():
-            print(f'  {k:26s} {v}')
+        print_block('Метрики портфеля', result['metrics'])
+        print_block('Финансовые метрики (r=%.0f%%, T=%d лет)' % (
+            100 * result['assumptions']['discount_rate'],
+            result['assumptions']['horizon_years']), result['financial'])
+        print_block('Производные показатели', result['extras'])
 
     print('\n--- Ограничения: BASE (c0 <= %.0f) ---' % config['scenarios']['BASE']['c0_max_mrub'])
-    print(result['constraints']['BASE'].to_string(index=False))
+    print(fmt_constraints(result['constraints']['BASE']).to_string(index=False))
     base_ok = bool(result['constraints']['BASE']['ok'].all())
     print(f'  => {"PASS — портфель допустим в BASE" if base_ok else "FAIL — портфель НЕ допустим в BASE"}')
 
     print('\n--- Ограничения: STRESS (c0 <= %.0f) ---' % config['scenarios']['STRESS']['c0_max_mrub'])
-    print(result['constraints']['STRESS'].to_string(index=False))
+    print(fmt_constraints(result['constraints']['STRESS']).to_string(index=False))
     stress_ok = bool(result['constraints']['STRESS']['ok'].all())
     print(f'  => {"PASS — портфель допустим в STRESS" if stress_ok else "FAIL — портфель НЕ допустим в STRESS"}')
 
@@ -150,10 +237,12 @@ def main(argv=None):
         for scenario in tm.SCENARIOS:
             sc = result['scenarios'][scenario]
             print(f'  {scenario}: c0={sc["c0_utilization_pct"]:.1f}% лимита, opex={sc["opex_utilization_pct"]:.1f}% лимита, '
-                 f'запас c0={sc["headroom_c0_mrub"]:.1f} млн, feasible={sc["feasible"]}')
+                 f'запас c0={sc["headroom_c0_mrub"]:.1f} млн, '
+                  f'допустим: {"да" if sc["feasible"] else "НЕТ"}')
         print('\n--- Композитный score (веса: %s) ---' % (weights or 'равные 1/8'))
         for k, v in result['score'].items():
-            print(f'  {k:16s} {v:.4f}' if isinstance(v, float) else f'  {k:16s} {v}')
+            print(f'  {LABELS.get(k, k):32s} {v:>12.4f}' if isinstance(v, float)
+                  else f'  {LABELS.get(k, k):32s} {v}')
 
     if args.csv:
         flat = tm.flatten_result(result)

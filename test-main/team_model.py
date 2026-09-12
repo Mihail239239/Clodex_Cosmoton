@@ -8,7 +8,10 @@ team_model.py — расчетный слой команды поверх кан
   3. нормализация показателей и композитная метрика team_score;
   4. сценарные оценки BASE / STRESS и робастный критерий min(BASE, STRESS);
   5. полный перебор допустимых портфелей и поиск оптимума под заданные веса;
-  6. анализ чувствительности: меняется ли победитель при сдвиге весов.
+  6. анализ чувствительности: меняется ли победитель при сдвиге весов;
+  7. нормировка целевых показателей, три блочные fitness-функции
+     (деньги / общественная польза / качество) и фронт Парето — раздел 9;
+     полный перебор по всем режимам, включая пользовательские D, — pareto_search.py.
 
 Все допущения команды собраны в ASSUMPTIONS и передаются явно.
 """
@@ -574,7 +577,229 @@ def weight_sensitivity(lots, modes, config, weights=None, key='vpub', span=0.2, 
 
 
 # ---------------------------------------------------------------------------
-# 9. Демонстрационный прогон
+# 9. Нормировка целевых показателей, блочные fitness-функции и фронт Парето
+# ---------------------------------------------------------------------------
+# Три блока критериев, каждый — простая сумма нормированных компонент:
+#
+#   F_fin      деньги: NPV, индекс доходности PI, покрытие OPEX (kcash)
+#   F_public   общественная польза: vpub, SROI, доля лотов с общественным ядром
+#   F_quality  нефинансовое качество: t_rep, readiness, resilience, scale
+#
+# Деньги и общественная ценность лежат в разных блоках и нигде не складываются.
+# Итоговый вектор (F_fin, F_public, F_quality) сравнивается по частичному
+# порядку: X доминирует Y, если X >= Y по всем блокам и X > Y хотя бы по одному.
+# Максимальные элементы этого порядка — фронт Парето.
+#
+# Почему в F_fin ровно три компоненты. Денежная сторона портфеля задаётся тремя
+# числами (c0, opex, cash), и IRR, PI, ROI, срок окупаемости — монотонные
+# функции одного отношения (cash - opex) / c0. Брать их вместе значит считать
+# одно и то же несколько раз. PI выбран как дисконтированный представитель
+# семейства, определённый и при отрицательном потоке (IRR при cash <= opex не
+# существует). Срок окупаемости на данных кейса бесконечен у всех допустимых
+# портфелей и информации не несёт. subsidy_need = opex * (1 - kcash).
+#
+# Два способа нормировки:
+#   minmax    — компонента приводится к [0, 1] по min/max в пространстве
+#               допустимых кандидатов; эталон — само пространство перебора,
+#               пересчитываемое в том же прогоне (включая режимы D).
+#               Выбрана по умолчанию: все допустимые портфели убыточны по NPV,
+#               IRR и PI (суть кейса), и привязка к безубыточности дала бы либо
+#               константы, либо неограниченно отрицательные z, давящие сумму.
+#   threshold — z из раздела 2 плюс финансовые z, привязанные к точке
+#               безубыточности (NPV = 0, IRR = ставка, PI = 1, SROI = 1), с
+#               отсечкой снизу на Z_MIN. Используется как проверка устойчивости
+#               фронта к способу нормировки.
+
+Z_MIN = -1.0  # нижняя отсечка threshold-нормировки: "вдвое хуже порога или хуже"
+
+
+def criteria_row(metrics, config, financial=None):
+    """Плоская строка входов для реестра критериев: metrics + financial + производные."""
+    fin = financial if financial is not None else financial_metrics(metrics)
+    row = dict(metrics)
+    row.update(fin)
+    c0 = metrics['c0_mrub']
+    opex = metrics['opex_mrub_per_year']
+    row['subsidy_need_mrub_per_year'] = float(opex - metrics['cash_mrub_per_year'])
+    row['public_core_share'] = _safe_div(metrics['public_core_lots'], metrics['selected_lots'])
+    row['vpub_per_c0'] = _safe_div(metrics['vpub_mrub_per_year'], c0)
+    row['vpub_per_opex'] = _safe_div(metrics['vpub_mrub_per_year'], opex)
+    return row
+
+
+def _z_irr(r, c):
+    irr = r['irr']
+    if not math.isfinite(irr):
+        return float('-inf')
+    return _z_floor(1.0 + irr, 1.0 + r['discount_rate'])
+
+
+# Реестр критериев. raw — значение в ориентации "больше = лучше" (для minmax),
+# z — нормировка относительно порога (для threshold). Все компоненты одного
+# блока должны быть либо все из реестра, либо добавлены сюда с обоснованием.
+CRITERIA_REGISTRY = {
+    # --- деньги: только cash-поток, vpub сюда не входит ---
+    'npv': dict(
+        raw=lambda r, c: r['npv_mrub'],
+        z=lambda r, c: _z_floor(r['pv_cash_mrub'], r['total_cost_pv_mrub'])),  # 0 при NPV = 0
+    'irr': dict(
+        raw=lambda r, c: r['irr'],
+        z=_z_irr),                                                              # 0 при IRR = ставка
+    'profitability_index': dict(
+        raw=lambda r, c: r['profitability_index'],
+        z=lambda r, c: _z_floor(r['profitability_index'], 1.0)),               # 0 при PI = 1
+    'roi_horizon': dict(
+        raw=lambda r, c: r['roi_horizon'],
+        z=lambda r, c: _z_floor(1.0 + r['roi_horizon'], 1.0)),                 # 0 при ROI = 0
+    'payback_discounted': dict(
+        raw=lambda r, c: -r['payback_discounted_years'],
+        z=lambda r, c: _z_cost(r['payback_discounted_years'], r['horizon_years'])),  # 0 при T_pb = T
+    'subsidy_need': dict(
+        raw=lambda r, c: -r['subsidy_need_mrub_per_year'],
+        z=lambda r, c: -_safe_div(r['subsidy_need_mrub_per_year'], r['opex_mrub_per_year'])),  # 0 при cash = opex
+    'kcash': dict(
+        raw=lambda r, c: r['kcash'],
+        z=lambda r, c: _z_floor(r['kcash'], c['constraints_common']['kcash_min'])),
+    'capex': dict(
+        raw=lambda r, c: -r['c0_mrub'],
+        z=lambda r, c: _z_cost(r['c0_mrub'], c['scenarios']['STRESS']['c0_max_mrub'])),  # лимит STRESS
+    'opex': dict(
+        raw=lambda r, c: -r['opex_mrub_per_year'],
+        z=lambda r, c: _z_cost(r['opex_mrub_per_year'], c['constraints_common']['opex_max_mrub_per_year'])),
+    # --- общественная польза ---
+    'vpub': dict(
+        raw=lambda r, c: r['vpub_mrub_per_year'],
+        z=lambda r, c: _z_floor(r['vpub_mrub_per_year'], c['constraints_common']['vpub_min_mrub_per_year'])),
+    'sroi': dict(
+        raw=lambda r, c: r['sroi'],
+        z=lambda r, c: _z_floor(r['sroi'], 1.0)),                                # 0 при PV(vpub) = PV(затрат)
+    'public_core': dict(
+        raw=lambda r, c: r['public_core_share'],
+        z=lambda r, c: _z_floor(r['public_core_share'],
+                                c['constraints_common']['min_public_core_lots']
+                                / c['constraints_common']['selected_lots_exactly'])),
+    'vpub_per_c0': dict(
+        raw=lambda r, c: r['vpub_per_c0'],
+        z=lambda r, c: _z_floor(r['vpub_per_c0'],
+                                c['constraints_common']['vpub_min_mrub_per_year']
+                                / c['scenarios']['STRESS']['c0_max_mrub'])),
+    'vpub_per_opex': dict(
+        raw=lambda r, c: r['vpub_per_opex'],
+        z=lambda r, c: _z_floor(r['vpub_per_opex'],
+                                c['constraints_common']['vpub_min_mrub_per_year']
+                                / c['constraints_common']['opex_max_mrub_per_year'])),
+    # --- нефинансовое качество ---
+    't_rep': dict(
+        raw=lambda r, c: r['t_rep'],
+        z=lambda r, c: _z_floor(r['t_rep'], c['constraints_common']['t_rep_min'])),
+    'readiness': dict(raw=lambda r, c: r['readiness_1_5'], z=lambda r, c: _z_index(r['readiness_1_5'])),
+    'resilience': dict(raw=lambda r, c: r['resilience_1_5'], z=lambda r, c: _z_index(r['resilience_1_5'])),
+    'scale': dict(raw=lambda r, c: r['scale_1_5'], z=lambda r, c: _z_index(r['scale_1_5'])),
+    'capability_groups': dict(
+        raw=lambda r, c: r['capability_groups'],
+        z=lambda r, c: _z_floor(r['capability_groups'], c['constraints_common']['min_capability_groups'])),
+    'territorial_archetypes': dict(
+        raw=lambda r, c: r['territorial_archetypes'],
+        z=lambda r, c: _z_floor(r['territorial_archetypes'], c['constraints_common']['min_territorial_archetypes'])),
+}
+
+# Итоговый вектор выходных данных: имя блока -> компоненты из реестра.
+# Состав блоков — управленческое решение; менять здесь, реестр не трогать.
+BLOCKS = {
+    'F_fin': ('npv', 'profitability_index', 'kcash'),
+    'F_public': ('vpub', 'sroi', 'public_core'),
+    'F_quality': ('t_rep', 'readiness', 'resilience', 'scale'),
+}
+
+
+def block_components(blocks=None):
+    """Все компоненты реестра, входящие в блоки, без повторов и в порядке блоков."""
+    blocks = blocks or BLOCKS
+    seen, out = set(), []
+    for keys in blocks.values():
+        for k in keys:
+            if k not in CRITERIA_REGISTRY:
+                raise ValueError(f'Неизвестный критерий: {k}')
+            if k not in seen:
+                seen.add(k)
+                out.append(k)
+    return out
+
+
+def criteria_raw(row, config, keys=None):
+    """Сырые значения критериев в ориентации 'больше = лучше'."""
+    keys = keys or list(CRITERIA_REGISTRY)
+    return {k: float(CRITERIA_REGISTRY[k]['raw'](row, config)) for k in keys}
+
+
+def criteria_threshold_z(row, config, keys=None):
+    """z относительно порогов (как в разделе 2), с отсечкой снизу на Z_MIN."""
+    keys = keys or list(CRITERIA_REGISTRY)
+    out = {}
+    for k in keys:
+        z = float(CRITERIA_REGISTRY[k]['z'](row, config))
+        out[k] = max(Z_MIN, min(1.0, z)) if math.isfinite(z) else (1.0 if z > 0 else Z_MIN)
+    return out
+
+
+def normalize_criteria(raw, threshold_z=None, method='minmax'):
+    """Нормирует таблицу критериев (строки — кандидаты, столбцы — критерии).
+
+    minmax:    (x - min) / (max - min) по конечным значениям столбца; nan/inf
+               и столбцы-константы дают 0 (худшее / нет информации).
+    threshold: возвращает threshold_z (уже отсечённые z относительно порогов).
+    """
+    if method == 'threshold':
+        if threshold_z is None:
+            raise ValueError('Для method=threshold нужна таблица threshold_z')
+        return threshold_z.astype(float)
+    if method != 'minmax':
+        raise ValueError(f'Неизвестный метод нормировки: {method}')
+    out = pd.DataFrame(index=raw.index)
+    for col in raw.columns:
+        x = raw[col].to_numpy(dtype=float)
+        finite = np.isfinite(x)
+        z = np.zeros(len(x))
+        if finite.any():
+            lo, hi = x[finite].min(), x[finite].max()
+            if hi > lo:
+                z[finite] = (x[finite] - lo) / (hi - lo)
+        out[col] = z
+    return out
+
+
+def fitness_function(z, keys):
+    """Блочная fitness-функция: простая сумма нормированных компонент."""
+    return z[list(keys)].sum(axis=1)
+
+
+def criteria_vector(z, blocks=None):
+    """Итоговый вектор выходных данных: по столбцу на каждый блок."""
+    blocks = blocks or BLOCKS
+    return pd.DataFrame({name: fitness_function(z, keys) for name, keys in blocks.items()}, index=z.index)
+
+
+def pareto_mask(values):
+    """Максимальные элементы по частичному порядку 'больше = лучше по всем координатам'.
+
+    values: массив (n, k). Строка i остаётся, если нет j с V[j] >= V[i] по всем
+    координатам и V[j] > V[i] хотя бы по одной. Одинаковые векторы остаются оба.
+    """
+    V = np.asarray(values, dtype=float)
+    if V.ndim != 2 or not np.isfinite(V).all():
+        raise ValueError('Ожидается конечная матрица (n, k)')
+    n = len(V)
+    keep = np.ones(n, dtype=bool)
+    for i in range(n):
+        ge = np.all(V >= V[i], axis=1)
+        gt = np.any(V > V[i], axis=1)
+        if np.any(ge & gt):
+            keep[i] = False
+    return keep
+
+
+# ---------------------------------------------------------------------------
+# 10. Демонстрационный прогон
 # ---------------------------------------------------------------------------
 
 def _demo():
